@@ -56,7 +56,6 @@
     let drawing = false
     let paused = false
     let lastPinch = false
-    let lastFist = false
     let lastOpen = false
 
     /* weather */
@@ -125,19 +124,12 @@
     }
 
     function detectGestures (kp) {
-      const palm = kp[0]
       const idx = kp[8]
       const thb = kp[4]
 
       const pinching = Math.hypot(idx.x - thb.x, idx.y - thb.y) < 0.05
 
-      const fist =
-        Math.hypot(kp[8].x - palm.x, kp[8].y - palm.y) < 0.10 &&
-        Math.hypot(kp[12].x - palm.x, kp[12].y - palm.y) < 0.10 &&
-        Math.hypot(kp[16].x - palm.x, kp[16].y - palm.y) < 0.10 &&
-        Math.hypot(kp[20].x - palm.x, kp[20].y - palm.y) < 0.10
-
-      const open = !fist && !pinching &&
+      const open = !pinching &&
         fingerExtended(kp, 8) &&
         fingerExtended(kp, 12) &&
         fingerExtended(kp, 16) &&
@@ -145,7 +137,6 @@
 
       return {
         pinching,
-        fist,
         open
       }
     }
@@ -238,17 +229,11 @@
 
       if (!hands.length) {
         lastPinch = false
-        lastFist = false
         lastOpen = false
         return
       }
 
       const kp = hands[0].keypoints
-
-      const x = kp[8].x
-      const y = kp[8].y
-      smoothX = smoothX === null ? x : smoothX * 0.7 + x * 0.3
-      smoothY = smoothY === null ? y : smoothY * 0.7 + y * 0.3
 
       const vw = video.videoWidth || 640
       const vh = video.videoHeight || 480
@@ -256,6 +241,11 @@
         x: p.x / vw,
         y: p.y / vh
       }))
+
+      const x = (kp[8].x / vw) * window.innerWidth
+      const y = (kp[8].y / vh) * window.innerHeight
+      smoothX = smoothX === null ? x : smoothX * 0.7 + x * 0.3
+      smoothY = smoothY === null ? y : smoothY * 0.7 + y * 0.3
 
       const {
         pinching,
