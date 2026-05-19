@@ -1,1 +1,299 @@
-<h1>Hello World Wide Web!</h1>
+<!DOCTYPE html>
+<html style="filter: invert(0);" lang="en-US">
+  <head>
+    <title>Cloud Paint</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://generativeart.online/css/10print.css">
+  </head>
+
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/hand-pose-detection"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands"></script>
+  <script src="https://cdn.jsdelivr.net/gh/netizenorg/netnet-standard-library/build/nn.min.js"></script>
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+  <canvas id="draw"></canvas>
+  <div id="map"></div>
+
+  <style>
+    html,
+    body {
+      margin: 0;
+      height: 100%;
+    }
+
+    #map {
+      position: fixed;
+      inset: 0;
+      z-index: -1;
+    }
+
+    #draw {
+      position: fixed;
+      inset: 0;
+      z-index: 5;
+      pointer-events: none;
+      mix-blend-mode: difference;
+    }
+
+    #map.inverted {
+      filter: invert(1);
+    }
+  </style>
+
+  <script>
+    /* global L */
+    let map
+    let layers = []
+    let index = 0
+    let video
+    let model
+    let smoothX = null
+    let smoothY = null
+    let inverted = false
+    let clicks = 0
+    let timer = null
+    let drawing = false
+    let paused = false
+    let lastPinch = false
+    let lastFist = false
+    let lastOpen = false
+
+    /* weather */
+    async function setupRadar (lat, lon) {
+      const res = await fetch('https://api.rainviewer.com/public/weather-maps.json')
+      const data = await res.json()
+      const host = data.host
+      const frames = data.radar.past.slice(-6)
+
+      map = L.map('map', {
+        zoomControl: false,
+        attributionControl: false,
+        dragging: false,
+        scrollWheelZoom: false,
+        doubleClickZoom: false
+      }).setView([lat, lon], 6)
+
+      frames.forEach((frame, i) => {
+        const layer = L.tileLayer(
+          `${host}${frame.path}/256/{z}/{x}/{y}/2/1_1.png`, {
+            opacity: i === 0 ? 0.6 : 0
+          }
+        ).addTo(map)
+        layers.push(layer)
+      })
+
+      animate()
+    }
+
+    function fadeLayers (fromLayer, toLayer, duration = 600) {
+      const steps = 20
+      let step = 0
+      const interval = setInterval(() => {
+        step++
+        const progress = step / steps
+        fromLayer.setOpacity(0.6 * (1 - progress))
+        toLayer.setOpacity(0.6 * progress)
+        if (step >= steps) clearInterval(interval)
+      }, duration / steps)
+    }
+
+    function animate () {
+      if (layers.length < 2) return
+      const current = layers[index]
+      index = (index + 1) % layers.length
+      fadeLayers(current, layers[index])
+      setTimeout(animate, 1200)
+    }
+
+    function main () {
+      if (!navigator.geolocation) {
+        setupRadar(41.8781, -87.6298)
+        return
+      }
+      navigator.geolocation.getCurrentPosition(
+        pos => setupRadar(pos.coords.latitude, pos.coords.longitude),
+        () => setupRadar(41.8781, -87.6298)
+      )
+    }
+
+    main()
+
+    /* gesture detect */
+    function fingerExtended (kp, tipIdx) {
+      return (kp[tipIdx - 3].y - kp[tipIdx].y) > 0.0
+    }
+
+    function detectGestures (kp) {
+      const palm = kp[0]
+      const idx = kp[8]
+      const thb = kp[4]
+
+      const pinching = Math.hypot(idx.x - thb.x, idx.y - thb.y) < 0.05
+
+      const fist =
+        Math.hypot(kp[8].x - palm.x, kp[8].y - palm.y) < 0.10 &&
+        Math.hypot(kp[12].x - palm.x, kp[12].y - palm.y) < 0.10 &&
+        Math.hypot(kp[16].x - palm.x, kp[16].y - palm.y) < 0.10 &&
+        Math.hypot(kp[20].x - palm.x, kp[20].y - palm.y) < 0.10
+
+      const open = !fist && !pinching &&
+        fingerExtended(kp, 8) &&
+        fingerExtended(kp, 12) &&
+        fingerExtended(kp, 16) &&
+        fingerExtended(kp, 20)
+
+      return {
+        pinching,
+        fist,
+        open
+      }
+    }
+
+    /* hand tracking */
+    async function setupHandTracking () {
+      video = nn.create('video')
+        .addTo('body')
+        .css({
+          position: 'fixed',
+          inset: 0,
+          width: '100vw',
+          height: '100vh',
+          objectFit: 'cover',
+          opacity: 0.1,
+          transform: 'scale(-1, 1)',
+          zIndex: 1,
+          pointerEvents: 'none'
+        })
+        .set({
+          autoplay: true,
+          muted: true,
+          stream: await nn.askFor({
+            video: true
+          })
+        })
+
+      model = await handPoseDetection.createDetector(
+        handPoseDetection.SupportedModels.MediaPipeHands, {
+          runtime: 'mediapipe',
+          solutionPath: 'https://cdn.jsdelivr.net/npm/@mediapipe/hands',
+          modelType: 'full',
+          maxHands: 1
+        }
+      )
+
+      loop()
+    }
+
+    setupHandTracking()
+
+    /* color inversion */
+    document.addEventListener('click', () => {
+      clicks++
+      clearTimeout(timer)
+      timer = setTimeout(() => {
+        clicks = 0
+      }, 300)
+      if (clicks === 3) {
+        inverted = !inverted
+        document.documentElement.style.filter = inverted ? 'invert(1)' : 'invert(0)'
+        clicks = 0
+      }
+    })
+
+    /* ─── canvas ─── */
+    const canvas = document.getElementById('draw')
+    const ctx = canvas.getContext('2d')
+
+    function resizeCanvas () {
+      const dpr = window.devicePixelRatio || 1
+      canvas.width = window.innerWidth * dpr
+      canvas.height = window.innerHeight * dpr
+      canvas.style.width = window.innerWidth + 'px'
+      canvas.style.height = window.innerHeight + 'px'
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    }
+
+    resizeCanvas()
+    window.addEventListener('resize', resizeCanvas)
+
+    function paintAt (x, y, radius = 40) {
+      ctx.globalCompositeOperation = 'lighter'
+      const g = ctx.createRadialGradient(x, y, 0, x, y, radius)
+      g.addColorStop(0, 'rgba(255,255,255,0.8)')
+      g.addColorStop(1, 'rgba(255,255,255,0)')
+      ctx.fillStyle = g
+      ctx.beginPath()
+      ctx.arc(x, y, radius, 0, Math.PI * 2)
+      ctx.fill()
+    }
+
+    /* ─── hand ─── */
+    async function loop () {
+      requestAnimationFrame(loop)
+
+      const hands = await model.estimateHands(video, {
+        flipHorizontal: true
+      })
+
+      if (!hands.length) {
+        lastPinch = false
+        lastFist = false
+        lastOpen = false
+        return
+      }
+
+      const kp = hands[0].keypoints
+
+      const x = kp[8].x
+      const y = kp[8].y
+      smoothX = smoothX === null ? x : smoothX * 0.7 + x * 0.3
+      smoothY = smoothY === null ? y : smoothY * 0.7 + y * 0.3
+
+      const vw = video.videoWidth || 640
+      const vh = video.videoHeight || 480
+      const normKp = kp.map(p => ({
+        x: p.x / vw,
+        y: p.y / vh
+      }))
+
+      const {
+        pinching,
+        open
+      } = detectGestures(normKp)
+
+      /* pinch: pause */
+      if (pinching && !lastPinch) paused = true
+      if (!pinching && lastPinch) paused = false
+      lastPinch = pinching
+
+      /* open palm: clear canvas */
+      if (open && !lastOpen) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height)
+      }
+      lastOpen = open
+
+      /* draw */
+      if (!paused && !open) {
+        paintAt(smoothX, smoothY)
+      }
+    }
+
+    /* mouse drawing */
+    document.addEventListener('pointerdown', () => {
+      drawing = true
+    })
+    document.addEventListener('pointerup', () => {
+      drawing = false
+    })
+
+    document.addEventListener('pointermove', e => {
+      if (!drawing) return
+      paintAt(e.clientX, e.clientY)
+    })
+
+    document.addEventListener('dblclick', () => {
+      ctx.clearRect(0, 0, canvas.width, canvas.height)
+    })
+  </script>
+</html>
